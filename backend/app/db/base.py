@@ -1,0 +1,40 @@
+"""Database base configuration."""
+from datetime import datetime
+from sqlalchemy import create_engine, Column, DateTime
+from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
+from app.core.config import settings
+
+
+class Base(DeclarativeBase):
+    """Base class for all database models."""
+
+    @declared_attr
+    def __tablename__(cls) -> str:
+        """Generate table name from class name."""
+        return cls.__name__.lower()
+
+    # Common columns for all tables
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+# Create engine and session
+engine = create_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    echo=settings.DEBUG
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def get_db():
+    """Get database session dependency."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

@@ -1,0 +1,50 @@
+"""Outreach events model for tracking sends."""
+from datetime import datetime
+from enum import Enum as PyEnum
+from sqlalchemy import Column, Integer, String, DateTime, Enum, Text, ForeignKey, Index
+from app.db.base import Base
+
+
+class OutreachStatus(str, PyEnum):
+    """Outreach event status."""
+    SENT = "sent"
+    REPLIED = "replied"
+    BOUNCED = "bounced"
+    SKIPPED = "skipped"
+
+
+class OutreachChannel(str, PyEnum):
+    """Outreach channel type."""
+    MAILMERGE = "mailmerge"
+    SMTP = "smtp"
+    M365 = "m365"
+    GMAIL = "gmail"
+    API = "api"
+
+
+class OutreachEvent(Base):
+    """Outreach events model - Every send attempt and result."""
+
+    __tablename__ = "outreach_events"
+
+    event_id = Column(Integer, primary_key=True, autoincrement=True)
+    contact_id = Column(Integer, ForeignKey('contact_details.contact_id'), nullable=False)
+    lead_id = Column(Integer, ForeignKey('lead_details.lead_id'), nullable=True)
+    sent_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    channel = Column(Enum(OutreachChannel), nullable=False)
+    template_id = Column(Integer, nullable=True)
+    subject = Column(String(500), nullable=True)
+    status = Column(Enum(OutreachStatus), nullable=False)
+    bounce_reason = Column(Text, nullable=True)
+    reply_detected_at = Column(DateTime, nullable=True)
+    skip_reason = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index('idx_outreach_contact', 'contact_id'),
+        Index('idx_outreach_lead', 'lead_id'),
+        Index('idx_outreach_status', 'status'),
+        Index('idx_outreach_sent_at', 'sent_at'),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OutreachEvent(event_id={self.event_id}, contact_id={self.contact_id}, status='{self.status}')>"

@@ -1,0 +1,135 @@
+"""Base adapter interfaces for all provider types."""
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
+
+
+class BaseAdapter(ABC):
+    """Base class for all adapters."""
+
+    @abstractmethod
+    def test_connection(self) -> bool:
+        """Test connection to the provider."""
+        pass
+
+
+class JobSourceAdapter(BaseAdapter):
+    """Base adapter for job source providers."""
+
+    @abstractmethod
+    def fetch_jobs(
+        self,
+        location: str = "United States",
+        posted_within_days: int = 1,
+        industries: Optional[List[str]] = None,
+        exclude_keywords: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch job postings from the source.
+
+        Returns list of dicts with keys:
+        - client_name: Company name
+        - job_title: Job title
+        - state: State (2-letter code)
+        - posting_date: Date posted
+        - job_link: URL to job posting
+        - salary_min: Minimum salary (optional)
+        - salary_max: Maximum salary (optional)
+        """
+        pass
+
+    @abstractmethod
+    def normalize(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize raw job data to standard format."""
+        pass
+
+
+class ContactDiscoveryAdapter(BaseAdapter):
+    """Base adapter for contact discovery providers."""
+
+    @abstractmethod
+    def search_contacts(
+        self,
+        company_name: str,
+        job_title: Optional[str] = None,
+        state: Optional[str] = None,
+        titles: Optional[List[str]] = None,
+        limit: int = 4
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for contacts at a company.
+
+        Returns list of dicts with keys:
+        - first_name
+        - last_name
+        - title
+        - email
+        - phone (optional)
+        - location_state
+        """
+        pass
+
+    @abstractmethod
+    def normalize(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize raw contact data to standard format."""
+        pass
+
+
+class EmailValidationAdapter(BaseAdapter):
+    """Base adapter for email validation providers."""
+
+    @abstractmethod
+    def validate_email(self, email: str) -> Dict[str, Any]:
+        """
+        Validate a single email.
+
+        Returns dict with keys:
+        - status: valid, invalid, catch_all, unknown
+        - sub_status: Provider-specific status
+        - raw_response: Full provider response
+        """
+        pass
+
+    @abstractmethod
+    def validate_bulk(self, emails: List[str]) -> List[Dict[str, Any]]:
+        """
+        Validate multiple emails.
+
+        Returns list of validation results.
+        """
+        pass
+
+
+class EmailSendAdapter(BaseAdapter):
+    """Base adapter for email sending providers."""
+
+    @abstractmethod
+    def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        body_html: str,
+        body_text: Optional[str] = None,
+        from_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Send a single email.
+
+        Returns dict with keys:
+        - success: bool
+        - message_id: Provider message ID
+        - error: Error message if failed
+        """
+        pass
+
+    @abstractmethod
+    def send_bulk(
+        self,
+        messages: List[Dict[str, Any]],
+        rate_limit: int = 30
+    ) -> List[Dict[str, Any]]:
+        """
+        Send multiple emails with rate limiting.
+
+        Returns list of send results.
+        """
+        pass

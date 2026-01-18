@@ -1,0 +1,143 @@
+"""Outreach management endpoints."""
+from typing import List, Optional
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from app.api.deps import get_db, get_current_active_user
+from app.db.models.user import User
+from app.db.models.outreach import OutreachEvent, OutreachStatus, OutreachChannel
+from app.schemas.outreach import OutreachEventCreate, OutreachEventResponse
+
+router = APIRouter(prefix="/outreach", tags=["Outreach"])
+
+
+@router.get("/events", response_model=List[OutreachEventResponse])
+async def list_outreach_events(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    status_filter: Optional[OutreachStatus] = Query(None, alias="status"),
+    channel: Optional[OutreachChannel] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """List outreach events."""
+    query = db.query(OutreachEvent)
+
+    if status_filter:
+        query = query.filter(OutreachEvent.status == status_filter)
+    if channel:
+        query = query.filter(OutreachEvent.channel == channel)
+    if from_date:
+        query = query.filter(OutreachEvent.sent_at >= from_date)
+    if to_date:
+        query = query.filter(OutreachEvent.sent_at <= to_date)
+
+    events = query.order_by(OutreachEvent.sent_at.desc()).offset(skip).limit(limit).all()
+    return [OutreachEventResponse.model_validate(e) for e in events]
+
+
+@router.get("/events/{event_id}", response_model=OutreachEventResponse)
+async def get_outreach_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get outreach event by ID."""
+    event = db.query(OutreachEvent).filter(OutreachEvent.event_id == event_id).first()
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Outreach event not found"
+        )
+    return OutreachEventResponse.model_validate(event)
+
+
+@router.post("/events", response_model=OutreachEventResponse, status_code=status.HTTP_201_CREATED)
+async def create_outreach_event(
+    event_in: OutreachEventCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Create an outreach event."""
+    event = OutreachEvent(**event_in.model_dump())
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    return OutreachEventResponse.model_validate(event)
+
+
+@router.post("/run-mailmerge")
+async def run_mailmerge_export(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Generate mail merge export package."""
+    from app.services.pipelines.outreach import run_outreach_mailmerge_pipeline
+
+    background_tasks.add_task(
+        run_outreach_mailmerge_pipeline,
+        triggered_by=current_user.email
+    )
+
+    return {
+        "message": "Mail merge export started",
+        "status": "processing"
+    }
+
+
+@router.post("/send-emails")
+async def send_emails(
+    background_tasks: BackgroundTasks,
+    dry_run: bool = Query(True, description="If true, validate but don't send"),
+    limit: int = Query(30, description="Max emails to send"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Send emails programmatically (respects daily limits and cooldown)."""
+    from app.services.pipelines.outreach import run_outreach_send_pipeline
+
+    background_tasks.add_task(
+        run_outreach_send_pipeline,
+        dry_run=dry_run,
+        limit=limit,
+        triggered_by=current_user.email
+    )
+
+    return {
+        "message": f"Email sending started (dry_run={dry_run}, limit={limit})",
+        "status": "processing"
+    }
+
+
+@router.get("/stats/summary")
+async def get_outreach_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get outreach statistics summary."""
+    total = db.query(func.count(OutreachEvent.event_id)).scalar()
+
+    by_status = db.query(
+        OutreachEvent.status,
+        func.count(OutreachEvent.event_id)
+    ).group_by(OutreachEvent.status).all()
+
+    sent_count = next((c for s, c in by_status if s == OutreachStatus.SENT), 0)
+    bounced_count = next((c for s, c in by_status if s == OutreachStatus.BOUNCED), 0)
+    replied_count = next((c for s, c in by_status if s == OutreachStatus.REPLIED), 0)
+
+    bounce_rate = (bounced_count / sent_count * 100) if sent_count > 0 else 0
+    reply_rate = (replied_count / sent_count * 100) if sent_count > 0 else 0
+
+    return {
+        "total_events": total,
+        "by_status": {str(s): c for s, c in by_status if s},
+        "bounce_rate": round(bounce_rate, 2),
+        "reply_rate": round(reply_rate, 2)
+    }
