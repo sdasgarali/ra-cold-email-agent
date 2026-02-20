@@ -47,7 +47,7 @@ class MockContactDiscoveryAdapter(ContactDiscoveryAdapter):
             contact_state = state if state else random.choice(self.STATES)
 
             # Generate email
-            company_domain = company_name.lower().replace(" ", "").replace(",", "").replace(".", "")[:15]
+            company_domain = company_name.lower().replace(" ", "").replace(",", "").replace(".", "").replace("'", "").replace("&", "").replace("(", "").replace(")", "")[:15]
             email = f"{first_name.lower()}.{last_name.lower()}@{company_domain}.com"
 
             contact = {

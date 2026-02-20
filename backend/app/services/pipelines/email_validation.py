@@ -13,6 +13,11 @@ from app.core.config import settings
 from app.services.adapters.email_validation.mock import MockEmailValidationAdapter
 from app.services.adapters.email_validation.neverbounce import NeverBounceAdapter
 from app.services.adapters.email_validation.zerobounce import ZeroBounceAdapter
+from app.services.adapters.email_validation.hunter import HunterAdapter
+from app.services.adapters.email_validation.clearout import ClearoutAdapter
+from app.services.adapters.email_validation.emailable import EmailableAdapter
+from app.services.adapters.email_validation.mailboxvalidator import MailboxValidatorAdapter
+from app.services.adapters.email_validation.reacher import ReacherAdapter
 
 logger = structlog.get_logger()
 
@@ -21,12 +26,20 @@ def get_email_validation_adapter(provider: Optional[str] = None):
     """Get the configured email validation adapter."""
     provider = provider or settings.EMAIL_VALIDATION_PROVIDER
 
-    if provider == "neverbounce":
-        return NeverBounceAdapter()
-    elif provider == "zerobounce":
-        return ZeroBounceAdapter()
-    else:
-        return MockEmailValidationAdapter()
+    adapters = {
+        "neverbounce": NeverBounceAdapter,
+        "zerobounce": ZeroBounceAdapter,
+        "hunter": HunterAdapter,
+        "clearout": ClearoutAdapter,
+        "emailable": EmailableAdapter,
+        "mailboxvalidator": MailboxValidatorAdapter,
+        "reacher": ReacherAdapter,
+    }
+
+    adapter_class = adapters.get(provider)
+    if adapter_class:
+        return adapter_class()
+    return MockEmailValidationAdapter()
 
 
 def run_email_validation_pipeline(

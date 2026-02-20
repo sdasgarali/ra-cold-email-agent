@@ -1,4 +1,5 @@
 """Pipeline management endpoints."""
+import json
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, UploadFile, File
 from sqlalchemy.orm import Session
@@ -8,6 +9,65 @@ from app.db.models.user import User, UserRole
 from app.db.models.job_run import JobRun, JobStatus
 
 router = APIRouter(prefix="/pipelines", tags=["Pipelines"])
+
+
+def parse_counters(counters_json: str) -> dict:
+    """Parse counters JSON and return standardized fields."""
+    try:
+        if counters_json:
+            counters = json.loads(counters_json)
+            # Map pipeline counters to frontend expected format
+            # Lead sourcing uses: inserted, updated, skipped, errors
+            # Contact enrichment uses: contacts_found, leads_enriched, skipped, errors
+            # Email validation uses: validated, valid, invalid, errors
+            inserted = counters.get("inserted", 0)
+            updated = counters.get("updated", 0)
+            skipped = counters.get("skipped", 0)
+            errors = counters.get("errors", 0)
+            contacts_found = counters.get("contacts_found", 0)
+            leads_enriched = counters.get("leads_enriched", 0)
+            validated = counters.get("validated", 0)
+            valid_count = counters.get("valid", 0)
+            invalid_count = counters.get("invalid", 0)
+
+            # Calculate totals based on which pipeline ran
+            if contacts_found > 0 or leads_enriched > 0:
+                # Contact enrichment pipeline
+                total = contacts_found + skipped + errors
+                success = contacts_found
+            elif validated > 0 or valid_count > 0 or invalid_count > 0:
+                # Email validation pipeline
+                total = validated or (valid_count + invalid_count + errors)
+                success = valid_count or validated
+            else:
+                # Lead sourcing or other pipeline
+                total = inserted + updated + skipped + errors
+                success = inserted + updated
+
+            return {
+                "records_processed": total,
+                "records_success": success,
+                "records_failed": errors,
+                "inserted": inserted,
+                "updated": updated,
+                "skipped": skipped,
+                "errors": errors,
+                "contacts_found": contacts_found,
+                "leads_enriched": leads_enriched
+            }
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {
+        "records_processed": 0,
+        "records_success": 0,
+        "records_failed": 0,
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": 0,
+        "contacts_found": 0,
+        "leads_enriched": 0
+    }
 
 
 @router.get("/runs")
@@ -29,19 +89,23 @@ async def list_job_runs(
 
     runs = query.order_by(JobRun.started_at.desc()).offset(skip).limit(limit).all()
 
-    return [
-        {
+    results = []
+    for r in runs:
+        counters = parse_counters(r.counters_json)
+        results.append({
             "run_id": r.run_id,
             "pipeline_name": r.pipeline_name,
             "started_at": r.started_at,
             "ended_at": r.ended_at,
             "status": r.status.value if r.status else None,
             "counters": r.counters_json,
+            "records_processed": counters["records_processed"],
+            "records_success": counters["records_success"],
+            "records_failed": counters["records_failed"],
             "error_message": r.error_message,
             "triggered_by": r.triggered_by
-        }
-        for r in runs
-    ]
+        })
+    return results
 
 
 @router.get("/runs/{run_id}")
@@ -58,6 +122,8 @@ async def get_job_run(
             detail="Job run not found"
         )
 
+    counters = parse_counters(run.counters_json)
+
     return {
         "run_id": run.run_id,
         "pipeline_name": run.pipeline_name,
@@ -65,6 +131,9 @@ async def get_job_run(
         "ended_at": run.ended_at,
         "status": run.status.value if run.status else None,
         "counters": run.counters_json,
+        "records_processed": counters["records_processed"],
+        "records_success": counters["records_success"],
+        "records_failed": counters["records_failed"],
         "logs_path": run.logs_path,
         "error_message": run.error_message,
         "triggered_by": run.triggered_by
@@ -163,6 +232,45 @@ async def run_email_validation(
     return {
         "message": "Email validation started",
         "status": "processing"
+    }
+
+
+
+
+@router.post("/email-validation/run-selected")
+async def run_email_validation_selected(
+    request: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.OPERATOR]))
+):
+    """Run email validation for selected contact IDs."""
+    from app.services.pipelines.email_validation import run_email_validation_pipeline
+    from app.db.models.contact import ContactDetails
+
+    contact_ids = request.get("contact_ids", [])
+    if not contact_ids:
+        raise HTTPException(status_code=400, detail="No contact IDs provided")
+
+    contacts = db.query(ContactDetails).filter(
+        ContactDetails.contact_id.in_(contact_ids)
+    ).all()
+    emails = [c.email for c in contacts if c.email]
+
+    if not emails:
+        raise HTTPException(status_code=400, detail="No valid emails found for selected contacts")
+
+    background_tasks.add_task(
+        run_email_validation_pipeline,
+        emails=emails,
+        provider=None,
+        triggered_by=current_user.email
+    )
+
+    return {
+        "message": f"Email validation started for {len(emails)} contacts",
+        "status": "processing",
+        "count": len(emails)
     }
 
 

@@ -21,7 +21,8 @@ class JobSourceAdapter(BaseAdapter):
         location: str = "United States",
         posted_within_days: int = 1,
         industries: Optional[List[str]] = None,
-        exclude_keywords: Optional[List[str]] = None
+        exclude_keywords: Optional[List[str]] = None,
+        job_titles: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Fetch job postings from the source.
@@ -131,5 +132,58 @@ class EmailSendAdapter(BaseAdapter):
         Send multiple emails with rate limiting.
 
         Returns list of send results.
+        """
+        pass
+
+
+class AIAdapter(BaseAdapter):
+    """Base adapter for AI/LLM providers used for email content generation."""
+
+    @abstractmethod
+    def generate_email(
+        self,
+        contact_name: str,
+        contact_title: str,
+        company_name: str,
+        job_title: str,
+        template: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate personalized email content.
+
+        Returns dict with keys:
+        - subject: Email subject line
+        - body_html: HTML email body
+        - body_text: Plain text email body
+        """
+        pass
+
+    @abstractmethod
+    def generate_subject_variations(
+        self,
+        base_subject: str,
+        count: int = 3
+    ) -> List[str]:
+        """
+        Generate subject line variations for A/B testing.
+
+        Returns list of subject line strings.
+        """
+        pass
+
+    @abstractmethod
+    def analyze_response(
+        self,
+        email_content: str,
+        response_content: str
+    ) -> Dict[str, Any]:
+        """
+        Analyze an email response to determine intent.
+
+        Returns dict with keys:
+        - sentiment: positive, negative, neutral
+        - intent: interested, not_interested, question, out_of_office, bounce
+        - suggested_action: follow_up, archive, respond, etc.
         """
         pass

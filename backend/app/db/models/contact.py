@@ -1,5 +1,6 @@
 """Contact details model for discovered contacts."""
 from sqlalchemy import Column, Integer, String, Enum, Index, ForeignKey
+from sqlalchemy.orm import relationship
 from enum import Enum as PyEnum
 from app.db.base import Base
 
@@ -14,13 +15,19 @@ class PriorityLevel(str, PyEnum):
 
 
 class ContactDetails(Base):
-    """Contact details model - Discovered contacts for outreach."""
+    """Contact details model - Discovered contacts for outreach.
+
+    Each contact is linked to a specific lead (job posting) for targeted outreach.
+    """
 
     __tablename__ = "contact_details"
 
     contact_id = Column(Integer, primary_key=True, autoincrement=True)
 
-    # Company link
+    # Direct link to the lead this contact was discovered for
+    lead_id = Column(Integer, ForeignKey('lead_details.lead_id', ondelete='CASCADE'), nullable=True, index=True)
+
+    # Company link (kept for backward compatibility and convenience)
     client_name = Column(String(255), nullable=False, index=True)
 
     # Contact information
@@ -41,11 +48,15 @@ class ContactDetails(Base):
     # Last outreach tracking for cooldown enforcement
     last_outreach_date = Column(String(50), nullable=True)
 
+    # Relationship to lead
+    lead = relationship("LeadDetails", back_populates="contacts")
+
     __table_args__ = (
+        Index('idx_contact_lead', 'lead_id'),
         Index('idx_contact_client', 'client_name'),
         Index('idx_contact_email', 'email'),
         Index('idx_contact_priority', 'priority_level'),
     )
 
     def __repr__(self) -> str:
-        return f"<ContactDetails(contact_id={self.contact_id}, name='{self.first_name} {self.last_name}', email='{self.email}')>"
+        return f"<ContactDetails(contact_id={self.contact_id}, lead_id={self.lead_id}, name='{self.first_name} {self.last_name}', email='{self.email}')>"

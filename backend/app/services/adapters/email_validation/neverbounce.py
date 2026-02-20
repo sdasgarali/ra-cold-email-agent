@@ -19,8 +19,8 @@ class NeverBounceAdapter(EmailValidationAdapter):
         "unknown": ValidationStatus.UNKNOWN
     }
 
-    def __init__(self):
-        self.api_key = settings.NEVERBOUNCE_API_KEY
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or settings.NEVERBOUNCE_API_KEY
 
     def test_connection(self) -> bool:
         """Test connection to NeverBounce API."""

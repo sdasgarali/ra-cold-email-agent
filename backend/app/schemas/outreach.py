@@ -13,6 +13,8 @@ class OutreachEventCreate(BaseModel):
     template_id: Optional[int] = None
     subject: Optional[str] = None
     status: OutreachStatus
+    body_html: Optional[str] = None
+    body_text: Optional[str] = None
 
 
 class OutreachEventResponse(BaseModel):
@@ -28,6 +30,10 @@ class OutreachEventResponse(BaseModel):
     bounce_reason: Optional[str] = None
     reply_detected_at: Optional[datetime] = None
     skip_reason: Optional[str] = None
+    body_html: Optional[str] = None
+    body_text: Optional[str] = None
+    reply_subject: Optional[str] = None
+    reply_body: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

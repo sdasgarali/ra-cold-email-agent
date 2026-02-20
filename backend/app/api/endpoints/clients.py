@@ -31,7 +31,7 @@ def compute_client_category(db: Session, client_name: str) -> ClientCategory:
         return ClientCategory.PROSPECT
 
 
-@router.get("", response_model=List[ClientResponse])
+@router.get("")
 async def list_clients(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
@@ -52,7 +52,38 @@ async def list_clients(
         query = query.filter(ClientInfo.client_name.ilike(f"%{search}%"))
 
     clients = query.order_by(ClientInfo.client_name).offset(skip).limit(limit).all()
-    return [ClientResponse.model_validate(c) for c in clients]
+
+    # Return paginated response
+    total = db.query(func.count(ClientInfo.client_id)).scalar()
+    return {
+        "items": [ClientResponse.model_validate(c) for c in clients],
+        "total": total
+    }
+
+
+@router.get("/stats", tags=["Clients"])
+async def get_client_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get client statistics summary."""
+    total = db.query(func.count(ClientInfo.client_id)).scalar()
+
+    by_status = db.query(
+        ClientInfo.status,
+        func.count(ClientInfo.client_id)
+    ).group_by(ClientInfo.status).all()
+
+    by_category = db.query(
+        ClientInfo.client_category,
+        func.count(ClientInfo.client_id)
+    ).group_by(ClientInfo.client_category).all()
+
+    return {
+        "total": total,
+        "by_status": {str(s): c for s, c in by_status if s},
+        "by_category": {str(c): n for c, n in by_category if c}
+    }
 
 
 @router.get("/{client_id}", response_model=ClientResponse)
@@ -156,28 +187,3 @@ async def refresh_client_category(
     db.refresh(client)
 
     return ClientResponse.model_validate(client)
-
-
-@router.get("/stats/summary")
-async def get_client_stats(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """Get client statistics summary."""
-    total = db.query(func.count(ClientInfo.client_id)).scalar()
-
-    by_status = db.query(
-        ClientInfo.status,
-        func.count(ClientInfo.client_id)
-    ).group_by(ClientInfo.status).all()
-
-    by_category = db.query(
-        ClientInfo.client_category,
-        func.count(ClientInfo.client_id)
-    ).group_by(ClientInfo.client_category).all()
-
-    return {
-        "total": total,
-        "by_status": {str(s): c for s, c in by_status if s},
-        "by_category": {str(c): n for c, n in by_category if c}
-    }

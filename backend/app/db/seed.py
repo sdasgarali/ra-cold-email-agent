@@ -7,6 +7,7 @@ from app.db.models.lead import LeadDetails, LeadStatus
 from app.db.models.client import ClientInfo, ClientStatus, ClientCategory
 from app.db.models.contact import ContactDetails, PriorityLevel
 from app.db.models.settings import Settings
+from app.db.models.sender_mailbox import SenderMailbox, WarmupStatus, EmailProvider
 from app.core.security import get_password_hash
 
 
@@ -202,6 +203,71 @@ def seed_settings(db):
     db.commit()
 
 
+def seed_mailboxes(db):
+    """Seed sender mailboxes for cold email outreach."""
+    # Sender mailboxes with Cold-Ready status
+    mailboxes = [
+        {"email": "Brian@exzelon.com", "password": "Exz@2631", "display_name": "Brian from Exzelon"},
+        {"email": "David@exzelon.com", "password": "Exz@2631", "display_name": "David from Exzelon"},
+        {"email": "Stacey@exzelon.com", "password": "Exz@2631", "display_name": "Stacey from Exzelon"},
+        {"email": "bretiney@exzelon.com", "password": "Exz@2631", "display_name": "Bretiney from Exzelon"},
+        {"email": "Imely@exzelon.com", "password": "Exz@2631", "display_name": "Imely from Exzelon"},
+        {"email": "Jane.rose@exzelon.com", "password": "Exz@2631", "display_name": "Jane Rose from Exzelon"},
+        {"email": "Robert@exzelon.com", "password": "Exz@2631", "display_name": "Robert from Exzelon"},
+        {"email": "Britney@exzelon.com", "password": "Exz@2631", "display_name": "Britney from Exzelon"},
+        {"email": "Steve@exzelon.com", "password": "Exz@2631", "display_name": "Steve from Exzelon"},
+        {"email": "Jane@exzelon.com", "password": "Exz@2631", "display_name": "Jane from Exzelon"},
+    ]
+
+    for mailbox_data in mailboxes:
+        existing = db.query(SenderMailbox).filter(SenderMailbox.email == mailbox_data["email"]).first()
+        if not existing:
+            mailbox = SenderMailbox(
+                email=mailbox_data["email"],
+                password=mailbox_data["password"],
+                display_name=mailbox_data["display_name"],
+                provider=EmailProvider.MICROSOFT_365,
+                smtp_host="smtp.office365.com",
+                smtp_port=587,
+                imap_host="outlook.office365.com",
+                imap_port=993,
+                warmup_status=WarmupStatus.COLD_READY,
+                is_active=True,
+                daily_send_limit=30,
+                notes="Initial setup - Cold Ready for outreach"
+            )
+            db.add(mailbox)
+            print(f"Created mailbox: {mailbox_data['email']}")
+        else:
+            print(f"Mailbox already exists: {mailbox_data['email']}")
+
+    # Add Microsoft 365 admin account as a special sender
+    admin_mailbox_email = "Zanemartin@exzelon.com"
+    existing_admin = db.query(SenderMailbox).filter(SenderMailbox.email == admin_mailbox_email).first()
+    if not existing_admin:
+        admin_mailbox = SenderMailbox(
+            email=admin_mailbox_email,
+            password="Dex@2631",
+            display_name="Zane Martin - Exzelon",
+            provider=EmailProvider.MICROSOFT_365,
+            smtp_host="smtp.office365.com",
+            smtp_port=587,
+            imap_host="outlook.office365.com",
+            imap_port=993,
+            warmup_status=WarmupStatus.COLD_READY,
+            is_active=True,
+            daily_send_limit=50,
+            notes="Microsoft 365 Admin Account - Primary Sender"
+        )
+        db.add(admin_mailbox)
+        print(f"Created admin mailbox: {admin_mailbox_email}")
+    else:
+        print(f"Admin mailbox already exists: {admin_mailbox_email}")
+
+    db.commit()
+    print(f"Total mailboxes seeded: {len(mailboxes) + 1}")
+
+
 def run_seed():
     """Run all seed functions."""
     print("Starting database seeding...")
@@ -215,12 +281,14 @@ def run_seed():
         seed_leads(db)
         seed_contacts(db)
         seed_settings(db)
+        seed_mailboxes(db)
         print("\nDatabase seeding completed successfully!")
         print("\nTest credentials:")
         print("  Admin: admin@exzelon.com / Admin@123")
         print("  Operator: operator@exzelon.com / Operator@123")
         print("  Viewer: viewer@exzelon.com / Viewer@123")
         print("  Test Client: testclient@example.com / TestClient@123")
+        print("\nMailboxes seeded: 11 sender mailboxes (Cold-Ready status)")
     finally:
         db.close()
 

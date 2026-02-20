@@ -1,29 +1,39 @@
 """Apollo.io contact discovery adapter."""
 from typing import List, Dict, Any, Optional
 import httpx
+import structlog
 from app.services.adapters.base import ContactDiscoveryAdapter
 from app.core.config import settings
 from app.db.models.contact import PriorityLevel
 
+logger = structlog.get_logger()
+
+
+class ApolloCreditsExhaustedError(RuntimeError):
+    """Raised when Apollo API credits are exhausted."""
+    pass
+
 
 class ApolloAdapter(ContactDiscoveryAdapter):
-    """Adapter for Apollo.io contact discovery API."""
+    """Adapter for Apollo.io contact discovery API (Search + Enrich)."""
 
-    BASE_URL = "https://api.apollo.io/v1"
+    BASE_URL = "https://api.apollo.io/api/v1"
 
-    def __init__(self):
-        self.api_key = settings.APOLLO_API_KEY
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or settings.APOLLO_API_KEY
+        self._credits_exhausted = False
 
     def test_connection(self) -> bool:
         """Test connection to Apollo API."""
         if not self.api_key:
             return False
-
         try:
             with httpx.Client() as client:
-                response = client.get(
-                    f"{self.BASE_URL}/auth/health",
-                    headers={"X-Api-Key": self.api_key},
+                # Use search endpoint as health check (free, no credits)
+                response = client.post(
+                    f"{self.BASE_URL}/mixed_people/api_search",
+                    params={"per_page": 1, "person_titles[]": ["CEO"]},
+                    headers={"X-Api-Key": self.api_key, "Accept": "application/json"},
                     timeout=10
                 )
                 return response.status_code == 200
@@ -33,25 +43,79 @@ class ApolloAdapter(ContactDiscoveryAdapter):
     def _determine_priority(self, title: str) -> PriorityLevel:
         """Determine priority level based on job title."""
         title_lower = title.lower()
-
-        # P1: Job poster / Hiring Manager
         if any(kw in title_lower for kw in ["hiring manager", "talent acquisition"]):
             return PriorityLevel.P1_JOB_POSTER
-
-        # P2: HR/TA/Recruiter
         if any(kw in title_lower for kw in ["recruiter", "hr coordinator", "talent"]):
             return PriorityLevel.P2_HR_TA_RECRUITER
-
-        # P3: HR Manager/Director
         if any(kw in title_lower for kw in ["hr manager", "hrbp", "hr director", "vp hr", "vp human"]):
             return PriorityLevel.P3_HR_MANAGER
-
-        # P4: Operations leaders
         if any(kw in title_lower for kw in ["operations", "plant manager", "production", "business leader"]):
             return PriorityLevel.P4_OPS_LEADER
-
-        # P5: Functional managers
         return PriorityLevel.P5_FUNCTIONAL_MANAGER
+
+    def _search_people(self, client, company_name, titles, state, limit):
+        """Step 1: Search for people IDs (free, no credits consumed)."""
+        params = {
+            "per_page": limit * 2,
+            "q_organization_name": company_name,
+        }
+        if titles:
+            params["person_titles[]"] = titles
+        else:
+            params["person_titles[]"] = [
+                "HR Manager", "HR Director", "Talent Acquisition",
+                "Recruiter", "Operations Manager", "HRBP"
+            ]
+        if state:
+            params["person_locations[]"] = [f"{state}, US"]
+
+        response = client.post(
+            f"{self.BASE_URL}/mixed_people/api_search",
+            params=params,
+            headers={
+                "Content-Type": "application/json",
+                "X-Api-Key": self.api_key,
+                "Accept": "application/json"
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        people = data.get("people", [])
+        # Filter to those with email available
+        return [p for p in people if p.get("has_email")][:limit]
+
+    def _enrich_person(self, client, person_id):
+        """Step 2: Enrich a person to get email/details (costs credits)."""
+        if self._credits_exhausted:
+            raise ApolloCreditsExhaustedError("Apollo credits exhausted")
+
+        response = client.post(
+            f"{self.BASE_URL}/people/match",
+            params={
+                "id": person_id,
+                "reveal_personal_emails": "true"
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Api-Key": self.api_key,
+                "Accept": "application/json"
+            },
+            timeout=30
+        )
+
+        # Detect credit exhaustion
+        if response.status_code == 422:
+            error_data = response.json()
+            error_msg = error_data.get("error", "")
+            if "insufficient credits" in error_msg.lower():
+                self._credits_exhausted = True
+                logger.error("Apollo API credits exhausted! Upgrade plan at https://app.apollo.io/#/settings/plans/upgrade")
+                raise ApolloCreditsExhaustedError(error_msg)
+
+        response.raise_for_status()
+        data = response.json()
+        return data.get("person")
 
     def search_contacts(
         self,
@@ -61,51 +125,41 @@ class ApolloAdapter(ContactDiscoveryAdapter):
         titles: Optional[List[str]] = None,
         limit: int = 4
     ) -> List[Dict[str, Any]]:
-        """Search for contacts at a company using Apollo API."""
+        """Search for contacts at a company using Apollo API (Search + Enrich)."""
         if not self.api_key:
             raise ValueError("Apollo API key not configured")
 
-        # Build search payload
-        payload = {
-            "q_organization_name": company_name,
-            "per_page": limit * 2,  # Get extra to filter
-            "page": 1
-        }
-
-        if titles:
-            payload["person_titles"] = titles
-        else:
-            # Default decision-maker titles
-            payload["person_titles"] = [
-                "HR Manager", "HR Director", "Talent Acquisition",
-                "Recruiter", "Operations Manager", "HRBP"
-            ]
-
-        if state:
-            payload["person_locations"] = [f"{state}, US"]
+        if self._credits_exhausted:
+            raise ApolloCreditsExhaustedError("Apollo credits exhausted - skipping")
 
         try:
             with httpx.Client() as client:
-                response = client.post(
-                    f"{self.BASE_URL}/mixed_people/search",
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-Api-Key": self.api_key
-                    },
-                    json=payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                data = response.json()
+                # Step 1: Search for people IDs (free)
+                people = self._search_people(client, company_name, titles, state, limit)
+                logger.info(f"Apollo search found {len(people)} candidates for {company_name}")
 
+                if not people:
+                    return []
+
+                # Step 2: Enrich each person to get emails (costs credits)
                 contacts = []
-                for person in data.get("people", [])[:limit]:
-                    contact = self.normalize(person)
-                    if contact:
-                        contacts.append(contact)
+                for person_preview in people:
+                    try:
+                        person = self._enrich_person(client, person_preview["id"])
+                        if person:
+                            contact = self.normalize(person)
+                            if contact:
+                                contacts.append(contact)
+                    except ApolloCreditsExhaustedError:
+                        logger.error("Apollo credits exhausted - stopping enrichment")
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Apollo enrich failed for {person_preview.get('first_name', '?')}: {e}")
 
-                return contacts
+                return contacts[:limit]
 
+        except ApolloCreditsExhaustedError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Apollo API error: {str(e)}")
 
@@ -119,14 +173,19 @@ class ApolloAdapter(ContactDiscoveryAdapter):
             return None
 
         title = raw_data.get("title", "")
+        phone = None
+        phone_numbers = raw_data.get("phone_numbers", [])
+        if phone_numbers and len(phone_numbers) > 0:
+            phone = phone_numbers[0].get("sanitized_number", phone_numbers[0].get("number"))
 
         return {
             "first_name": raw_data.get("first_name", ""),
             "last_name": raw_data.get("last_name", ""),
             "title": title,
             "email": email,
-            "phone": raw_data.get("phone_numbers", [{}])[0].get("sanitized_number") if raw_data.get("phone_numbers") else None,
+            "phone": phone,
             "location_state": raw_data.get("state"),
             "priority_level": self._determine_priority(title),
             "source": "apollo"
         }
+

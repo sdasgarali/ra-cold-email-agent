@@ -1,0 +1,26 @@
+
+MAIL MERGE GUIDE
+================
+
+Generated: 2026-01-18T23:28:37.390348
+Total Contacts: 31
+
+MERGE FIELDS:
+- {First Name} - Contact first name
+- {Last Name} - Contact last name
+- {Email} - Contact email address
+- {Title} - Contact job title
+- {Company} - Company name
+- {State} - State
+
+STEPS:
+1. Open your Word template
+2. Use Insert > Mail Merge > Start Mail Merge
+3. Select the CSV file: ./data/exports/mailmerge_contacts_20260118_232837.csv
+4. Insert merge fields into your template
+5. Preview and send
+
+COMPLIANCE NOTES:
+- Always include unsubscribe link
+- Include company mailing address: Configure in settings
+- Do not send to same contact within 10 days

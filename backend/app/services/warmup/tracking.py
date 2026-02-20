@@ -1,0 +1,70 @@
+"""Open/Click Tracking Service - tracking pixel and link redirect."""
+import uuid
+import json
+from datetime import datetime
+from typing import Optional
+from sqlalchemy.orm import Session
+
+from app.db.models.warmup_email import WarmupEmail
+from app.db.models.settings import Settings
+
+
+def _get_setting(db: Session, key: str, default=None):
+    setting = db.query(Settings).filter(Settings.key == key).first()
+    if setting and setting.value_json:
+        try:
+            return json.loads(setting.value_json)
+        except Exception:
+            pass
+    return default
+
+
+def generate_tracking_pixel_url(tracking_id: str, base_url: str = None) -> str:
+    base = base_url or "http://localhost:8000"
+    return f"{base}/t/{tracking_id}/px.gif"
+
+
+def generate_tracked_link(tracking_id: str, original_url: str, base_url: str = None) -> str:
+    base = base_url or "http://localhost:8000"
+    import urllib.parse
+    encoded = urllib.parse.quote(original_url, safe="")
+    return f"{base}/t/{tracking_id}/l?url={encoded}"
+
+
+def inject_tracking(html_body: str, tracking_id: str, db: Session = None) -> str:
+    base_url = "http://localhost:8000"
+    if db:
+        base_url = _get_setting(db, "warmup_tracking_base_url", base_url)
+
+    pixel_url = generate_tracking_pixel_url(tracking_id, base_url)
+    pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none" alt="" />'
+
+    if "</body>" in html_body:
+        html_body = html_body.replace("</body>", f"{pixel_tag}</body>")
+    else:
+        html_body += pixel_tag
+
+    return html_body
+
+
+def record_open(tracking_id: str, db: Session) -> bool:
+    email = db.query(WarmupEmail).filter(WarmupEmail.tracking_id == tracking_id).first()
+    if not email:
+        return False
+    if not email.opened_at:
+        email.opened_at = datetime.utcnow()
+        from app.db.models.warmup_email import WarmupEmailStatus
+        if email.status == WarmupEmailStatus.SENT:
+            email.status = WarmupEmailStatus.OPENED
+        db.commit()
+    return True
+
+
+def record_click(tracking_id: str, url: str, db: Session) -> bool:
+    email = db.query(WarmupEmail).filter(WarmupEmail.tracking_id == tracking_id).first()
+    if not email:
+        return False
+    if not email.opened_at:
+        email.opened_at = datetime.utcnow()
+    db.commit()
+    return True

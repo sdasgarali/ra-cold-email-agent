@@ -39,6 +39,14 @@ class OutreachEvent(Base):
     reply_detected_at = Column(DateTime, nullable=True)
     skip_reason = Column(Text, nullable=True)
 
+    # Email body storage
+    body_html = Column(Text, nullable=True)
+    body_text = Column(Text, nullable=True)
+
+    # Reply content storage
+    reply_subject = Column(String(500), nullable=True)
+    reply_body = Column(Text, nullable=True)
+
     __table_args__ = (
         Index('idx_outreach_contact', 'contact_id'),
         Index('idx_outreach_lead', 'lead_id'),

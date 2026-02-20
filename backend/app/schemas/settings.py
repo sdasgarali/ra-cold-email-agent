@@ -6,7 +6,9 @@ from pydantic import BaseModel
 
 class SettingUpdate(BaseModel):
     """Schema for updating a setting."""
-    value: Any
+    value: Any = None
+    value_json: Optional[str] = None  # Allow raw JSON string
+    type: Optional[str] = None
     description: Optional[str] = None
 
 

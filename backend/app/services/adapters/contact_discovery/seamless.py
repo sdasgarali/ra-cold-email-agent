@@ -11,8 +11,8 @@ class SeamlessAdapter(ContactDiscoveryAdapter):
 
     BASE_URL = "https://api.seamless.ai/v1"
 
-    def __init__(self):
-        self.api_key = settings.SEAMLESS_API_KEY
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or settings.SEAMLESS_API_KEY
 
     def test_connection(self) -> bool:
         """Test connection to Seamless API."""

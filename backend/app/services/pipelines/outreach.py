@@ -9,6 +9,7 @@ import structlog
 from app.db.base import SessionLocal
 from app.db.models.lead import LeadDetails, LeadStatus
 from app.db.models.contact import ContactDetails
+from app.db.models.lead_contact import LeadContactAssociation
 from app.db.models.email_validation import EmailValidationResult, ValidationStatus
 from app.db.models.outreach import OutreachEvent, OutreachStatus, OutreachChannel
 from app.db.models.suppression import SuppressionList
@@ -16,6 +17,7 @@ from app.db.models.job_run import JobRun, JobStatus
 from app.core.config import settings
 from app.services.adapters.email_sending.mock import MockEmailSendAdapter
 from app.services.adapters.email_sending.smtp import SMTPAdapter
+from app.db.models.sender_mailbox import SenderMailbox
 
 logger = structlog.get_logger()
 
@@ -29,6 +31,47 @@ def get_email_send_adapter():
     else:
         return MockEmailSendAdapter()
 
+
+
+
+def render_signature_html(sig_json: str) -> str:
+    """Render structured signature JSON to clean HTML block."""
+    try:
+        sig = json.loads(sig_json)
+    except (json.JSONDecodeError, TypeError):
+        return ''
+
+    parts = []
+    if sig.get('sender_name'):
+        parts.append(f'<strong style="font-size:14px;color:#333333;">{sig["sender_name"]}</strong>')
+    if sig.get('title'):
+        parts.append(f'<span style="font-size:13px;color:#555555;">{sig["title"]}</span>')
+    if sig.get('company'):
+        parts.append(f'<span style="font-size:13px;color:#555555;">{sig["company"]}</span>')
+
+    contact_parts = []
+    if sig.get('phone'):
+        contact_parts.append(sig['phone'])
+    if sig.get('email'):
+        contact_parts.append(f'<a href="mailto:{sig["email"]}" style="color:#0066cc;text-decoration:none;">{sig["email"]}</a>')
+    if contact_parts:
+        parts.append('<span style="font-size:12px;color:#666666;">' + ' | '.join(contact_parts) + '</span>')
+
+    if sig.get('website'):
+        url = sig['website']
+        if not url.startswith('http'):
+            url = 'https://' + url
+        parts.append(f'<a href="{url}" style="font-size:12px;color:#0066cc;text-decoration:none;">{sig["website"]}</a>')
+
+    if not parts:
+        return ''
+
+    lines_html = '<br>'.join(parts)
+    return (
+        '<div style="margin-top:20px;padding-top:12px;border-top:1px solid #cccccc;font-family:Arial,sans-serif;">'
+        + lines_html
+        + '</div>'
+    )
 
 def check_send_eligibility(db, contact: ContactDetails) -> tuple[bool, str]:
     """
@@ -55,7 +98,7 @@ def check_send_eligibility(db, contact: ContactDetails) -> tuple[bool, str]:
         if not validation or validation.status != ValidationStatus.VALID:
             return False, "Email not validated or invalid"
 
-    # Check cooldown period
+    # Check cooldown period for this specific contact
     cooldown_date = datetime.utcnow() - timedelta(days=settings.COOLDOWN_DAYS)
     recent_outreach = db.query(OutreachEvent).filter(
         OutreachEvent.contact_id == contact.contact_id,
@@ -65,13 +108,22 @@ def check_send_eligibility(db, contact: ContactDetails) -> tuple[bool, str]:
     if recent_outreach:
         return False, f"Cooldown: sent on {recent_outreach.sent_at.date()}"
 
-    # Check per-company per-job limit
-    company_contacts_sent = db.query(OutreachEvent).join(ContactDetails).filter(
-        ContactDetails.client_name == contact.client_name,
-        OutreachEvent.status == OutreachStatus.SENT
-    ).count()
-    if company_contacts_sent >= settings.MAX_CONTACTS_PER_COMPANY_PER_JOB:
-        return False, "Max contacts per company reached"
+    # Check per-lead contact limit (only contacts linked to the same lead)
+    if contact.lead_id:
+        lead_contacts_sent = db.query(OutreachEvent).join(ContactDetails).filter(
+            ContactDetails.lead_id == contact.lead_id,
+            OutreachEvent.status == OutreachStatus.SENT
+        ).count()
+        if lead_contacts_sent >= settings.MAX_CONTACTS_PER_COMPANY_PER_JOB:
+            return False, f"Max contacts per lead reached ({lead_contacts_sent}/{settings.MAX_CONTACTS_PER_COMPANY_PER_JOB})"
+    else:
+        # Fallback for legacy contacts without lead_id
+        company_contacts_sent = db.query(OutreachEvent).join(ContactDetails).filter(
+            ContactDetails.client_name == contact.client_name,
+            OutreachEvent.status == OutreachStatus.SENT
+        ).count()
+        if company_contacts_sent >= settings.MAX_CONTACTS_PER_COMPANY_PER_JOB:
+            return False, "Max contacts per company reached"
 
     return True, "Eligible"
 
@@ -271,19 +323,32 @@ def run_outreach_send_pipeline(
                 counters["skipped"] += 1
                 continue
 
+            # Get sending mailbox and its signature
+            sending_mailbox = db.query(SenderMailbox).filter(
+                SenderMailbox.is_active == True,
+                SenderMailbox.emails_sent_today < SenderMailbox.daily_send_limit
+            ).first()
+
+            signature_html = ""
+            from_name = "Exzelon Team"
+            if sending_mailbox:
+                if sending_mailbox.email_signature_json:
+                    signature_html = render_signature_html(sending_mailbox.email_signature_json)
+                if sending_mailbox.display_name:
+                    from_name = sending_mailbox.display_name
+
+            body_content = f"<p>Dear {contact.first_name},</p>"
+            body_content += "<p>We noticed your company is hiring and wanted to reach out about our staffing solutions.</p>"
+            body_content += signature_html
+            body_content += '<hr><small>To unsubscribe, reply with "UNSUBSCRIBE"</small>'
+
             messages_to_send.append({
                 "contact": contact,
                 "to_email": contact.email,
                 "subject": f"Exciting Opportunity at {contact.client_name}",
-                "body_html": f"""
-                    <p>Dear {contact.first_name},</p>
-                    <p>We noticed your company is hiring and wanted to reach out about our staffing solutions.</p>
-                    <p>Best regards,<br>The Team</p>
-                    <hr>
-                    <small>To unsubscribe, reply with "UNSUBSCRIBE"</small>
-                """,
-                "body_text": f"Dear {contact.first_name},\n\nWe noticed your company is hiring...",
-                "from_name": "Exzelon Team"
+                "body_html": body_content,
+                "body_text": f"Dear {contact.first_name},\nWe noticed your company is hiring...",
+                "from_name": from_name
             })
 
         if not messages_to_send:
@@ -354,6 +419,125 @@ def run_outreach_send_pipeline(
         job_run.error_message = str(e)
         job_run.ended_at = datetime.utcnow()
         db.commit()
+        raise
+    finally:
+        db.close()
+
+
+def run_outreach_for_lead(
+    lead_id: int,
+    dry_run: bool = True,
+    triggered_by: str = "system"
+) -> Dict[str, Any]:
+    """
+    Send outreach emails to contacts of a specific lead only.
+    """
+    db = SessionLocal()
+    counters = {"sent": 0, "skipped": 0, "errors": 0, "lead_id": lead_id}
+
+    try:
+        logger.info("Starting outreach for lead", lead_id=lead_id, dry_run=dry_run)
+
+        lead = db.query(LeadDetails).filter(LeadDetails.lead_id == lead_id).first()
+        if not lead:
+            return {"error": "Lead not found", "lead_id": lead_id}
+
+        # Get contacts via junction table + legacy FK
+        junction_cids = [row[0] for row in db.query(LeadContactAssociation.contact_id).filter(
+            LeadContactAssociation.lead_id == lead_id
+        ).all()]
+
+        if junction_cids:
+            contacts = db.query(ContactDetails).filter(
+                (ContactDetails.lead_id == lead_id) |
+                (ContactDetails.contact_id.in_(junction_cids))
+            ).all()
+        else:
+            contacts = db.query(ContactDetails).filter(
+                ContactDetails.lead_id == lead_id
+            ).all()
+
+        if not contacts:
+            return {"message": "No contacts found for this lead", **counters}
+
+        adapter = get_email_send_adapter()
+
+        for contact in contacts:
+            eligible, reason = check_send_eligibility(db, contact)
+            if not eligible:
+                counters["skipped"] += 1
+                logger.debug("Contact skipped", email=contact.email, reason=reason)
+                continue
+
+            # Get sending mailbox
+            sending_mailbox = db.query(SenderMailbox).filter(
+                SenderMailbox.is_active == True,
+                SenderMailbox.emails_sent_today < SenderMailbox.daily_send_limit
+            ).first()
+
+            signature_html = ""
+            from_name = "Exzelon Team"
+            if sending_mailbox:
+                if sending_mailbox.email_signature_json:
+                    signature_html = render_signature_html(sending_mailbox.email_signature_json)
+                if sending_mailbox.display_name:
+                    from_name = sending_mailbox.display_name
+
+            body_content = f"<p>Dear {contact.first_name},</p>"
+            body_content += f"<p>We noticed {lead.client_name} is hiring for {lead.job_title} and wanted to reach out about our staffing solutions.</p>"
+            body_content += signature_html
+            body_content += '<hr><small>To unsubscribe, reply with "UNSUBSCRIBE"</small>'
+
+            subject = f"Staffing for {lead.job_title} at {lead.client_name}"
+            body_text = f"Dear {contact.first_name},\nWe noticed {lead.client_name} is hiring for {lead.job_title}..."
+
+            try:
+                if dry_run:
+                    logger.info("DRY RUN - Would send to", email=contact.email)
+                    send_status = OutreachStatus.SKIPPED
+                    skip_reason = "dry_run"
+                else:
+                    result = adapter.send_email(
+                        to_email=contact.email,
+                        subject=subject,
+                        body_html=body_content,
+                        body_text=body_text,
+                        from_name=from_name
+                    )
+                    if result["success"]:
+                        send_status = OutreachStatus.SENT
+                        skip_reason = None
+                        counters["sent"] += 1
+                    else:
+                        send_status = OutreachStatus.SKIPPED
+                        skip_reason = result.get("error", "Unknown error")
+                        counters["errors"] += 1
+
+                event = OutreachEvent(
+                    contact_id=contact.contact_id,
+                    lead_id=lead_id,
+                    channel=OutreachChannel.SMTP if not dry_run else OutreachChannel.MAILMERGE,
+                    subject=subject,
+                    status=send_status,
+                    skip_reason=skip_reason,
+                    body_html=body_content,
+                    body_text=body_text
+                )
+                db.add(event)
+
+                if send_status == OutreachStatus.SENT:
+                    contact.last_outreach_date = datetime.now().isoformat()
+
+            except Exception as e:
+                logger.error("Error sending to contact", error=str(e), email=contact.email)
+                counters["errors"] += 1
+
+        db.commit()
+        logger.info("Lead outreach completed", counters=counters)
+        return counters
+
+    except Exception as e:
+        logger.error("Lead outreach failed", error=str(e))
         raise
     finally:
         db.close()

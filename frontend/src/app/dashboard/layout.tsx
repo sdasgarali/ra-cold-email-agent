@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { useAuthStore } from '@/lib/store'
+import { warmupApi } from '@/lib/api'
 import {
   LayoutDashboard,
   Users,
@@ -14,6 +15,8 @@ import {
   CheckCircle,
   Building,
   BarChart3,
+  Inbox,
+  Flame,
 } from 'lucide-react'
 
 const navigation = [
@@ -23,6 +26,8 @@ const navigation = [
   { name: 'Contacts', href: '/dashboard/contacts', icon: Users },
   { name: 'Validation', href: '/dashboard/validation', icon: CheckCircle },
   { name: 'Outreach', href: '/dashboard/outreach', icon: Mail },
+  { name: 'Mailboxes', href: '/dashboard/mailboxes', icon: Inbox },
+  { name: 'Warmup Engine', href: '/dashboard/warmup', icon: Flame },
   { name: 'Pipelines', href: '/dashboard/pipelines', icon: BarChart3 },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ]
@@ -34,20 +39,50 @@ export default function DashboardLayout({
 }) {
   const router = useRouter()
   const { user, logout, isAuthenticated } = useAuthStore()
+  const [mounted, setMounted] = useState(false)
+  const [unreadAlerts, setUnreadAlerts] = useState(0)
+
+  // Handle mounting to avoid hydration mismatch
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   useEffect(() => {
-    if (!isAuthenticated()) {
+    if (mounted && !isAuthenticated()) {
       router.push('/login')
     }
-  }, [router, isAuthenticated])
+  }, [router, isAuthenticated, mounted])
+
+  useEffect(() => {
+    if (mounted && isAuthenticated()) {
+      warmupApi.getUnreadCount().then(data => setUnreadAlerts(data?.unread_count || 0)).catch(() => {})
+      const interval = setInterval(() => {
+        warmupApi.getUnreadCount().then(data => setUnreadAlerts(data?.unread_count || 0)).catch(() => {})
+      }, 60000)
+      return () => clearInterval(interval)
+    }
+  }, [mounted])
 
   const handleLogout = () => {
     logout()
     router.push('/login')
   }
 
+  // Show loading state until mounted to avoid hydration mismatch
+  if (!mounted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    )
+  }
+
   if (!isAuthenticated()) {
-    return null
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-gray-500">Redirecting to login...</div>
+      </div>
+    )
   }
 
   return (
@@ -68,6 +103,9 @@ export default function DashboardLayout({
             >
               <item.icon className="w-5 h-5" />
               {item.name}
+              {item.name === 'Warmup Engine' && unreadAlerts > 0 && (
+                <span className="ml-auto bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{unreadAlerts > 9 ? '9+' : unreadAlerts}</span>
+              )}
             </Link>
           ))}
         </nav>

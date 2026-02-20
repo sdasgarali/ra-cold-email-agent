@@ -28,7 +28,9 @@ export default function ClientsPage() {
     try {
       setLoading(true)
       const response = await clientsApi.list({ limit: 50 })
-      setClients(response || [])
+      // Handle both array and {items: [], total: N} response formats
+      const clientList = Array.isArray(response) ? response : (response?.items || [])
+      setClients(clientList)
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to fetch clients')
     } finally {
