@@ -1,7 +1,11 @@
 """Outreach pipeline service."""
 import json
 import os
+import smtplib
+import uuid
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any, List
 import pandas as pd
 import structlog
@@ -15,21 +19,44 @@ from app.db.models.outreach import OutreachEvent, OutreachStatus, OutreachChanne
 from app.db.models.suppression import SuppressionList
 from app.db.models.job_run import JobRun, JobStatus
 from app.core.config import settings
-from app.services.adapters.email_sending.mock import MockEmailSendAdapter
-from app.services.adapters.email_sending.smtp import SMTPAdapter
-from app.db.models.sender_mailbox import SenderMailbox
+from app.db.models.sender_mailbox import SenderMailbox, WarmupStatus
 
 logger = structlog.get_logger()
 
 
-def get_email_send_adapter():
-    """Get the configured email sending adapter."""
-    mode = settings.EMAIL_SEND_MODE
+def send_outreach_email(
+    sender_mailbox: SenderMailbox,
+    to_email: str,
+    subject: str,
+    body_html: str,
+    body_text: str
+) -> Dict[str, Any]:
+    """Send an outreach email using the sender mailbox's own SMTP credentials.
 
-    if mode == "smtp":
-        return SMTPAdapter()
-    else:
-        return MockEmailSendAdapter()
+    Follows the same proven pattern as warmup peer emails.
+    """
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["From"] = f"{sender_mailbox.display_name or sender_mailbox.email} <{sender_mailbox.email}>"
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg["Message-ID"] = f"<{uuid.uuid4()}@{sender_mailbox.email.split('@')[1]}>"
+
+        if body_text:
+            msg.attach(MIMEText(body_text, "plain"))
+        msg.attach(MIMEText(body_html, "html"))
+
+        smtp_host = sender_mailbox.smtp_host or "smtp.office365.com"
+        server = smtplib.SMTP(smtp_host, sender_mailbox.smtp_port or 587, timeout=30)
+        server.starttls()
+        server.login(sender_mailbox.email, sender_mailbox.password)
+        server.sendmail(sender_mailbox.email, to_email, msg.as_string())
+        server.quit()
+
+        return {"success": True, "message_id": msg["Message-ID"], "error": None}
+    except Exception as e:
+        logger.error("SMTP send failed", sender=sender_mailbox.email, to=to_email, error=str(e))
+        return {"success": False, "message_id": None, "error": str(e)}
 
 
 
@@ -289,8 +316,6 @@ def run_outreach_send_pipeline(
     try:
         logger.info("Starting outreach send", dry_run=dry_run, limit=limit)
 
-        adapter = get_email_send_adapter()
-
         # Check daily limit
         today = datetime.utcnow().date()
         today_sent = db.query(OutreachEvent).filter(
@@ -313,9 +338,9 @@ def run_outreach_send_pipeline(
             ContactDetails.validation_status == "valid"
         ).all()
 
-        messages_to_send = []
+        sent_count = 0
         for contact in contacts:
-            if len(messages_to_send) >= remaining_limit:
+            if sent_count >= remaining_limit:
                 break
 
             eligible, reason = check_send_eligibility(db, contact)
@@ -323,83 +348,76 @@ def run_outreach_send_pipeline(
                 counters["skipped"] += 1
                 continue
 
-            # Get sending mailbox and its signature
+            # Get sending mailbox (Cold Ready or Active, least loaded, with successful connection)
             sending_mailbox = db.query(SenderMailbox).filter(
                 SenderMailbox.is_active == True,
-                SenderMailbox.emails_sent_today < SenderMailbox.daily_send_limit
-            ).first()
+                SenderMailbox.warmup_status.in_([WarmupStatus.COLD_READY, WarmupStatus.ACTIVE]),
+                SenderMailbox.emails_sent_today < SenderMailbox.daily_send_limit,
+                SenderMailbox.connection_status == "successful"
+            ).order_by(SenderMailbox.emails_sent_today.asc()).first()
+
+            if not sending_mailbox:
+                logger.warning("No available sender mailbox with successful connection")
+                counters["skipped"] += 1
+                continue
 
             signature_html = ""
-            from_name = "Exzelon Team"
-            if sending_mailbox:
-                if sending_mailbox.email_signature_json:
-                    signature_html = render_signature_html(sending_mailbox.email_signature_json)
-                if sending_mailbox.display_name:
-                    from_name = sending_mailbox.display_name
+            if sending_mailbox.email_signature_json:
+                signature_html = render_signature_html(sending_mailbox.email_signature_json)
 
             body_content = f"<p>Dear {contact.first_name},</p>"
             body_content += "<p>We noticed your company is hiring and wanted to reach out about our staffing solutions.</p>"
             body_content += signature_html
             body_content += '<hr><small>To unsubscribe, reply with "UNSUBSCRIBE"</small>'
 
-            messages_to_send.append({
-                "contact": contact,
-                "to_email": contact.email,
-                "subject": f"Exciting Opportunity at {contact.client_name}",
-                "body_html": body_content,
-                "body_text": f"Dear {contact.first_name},\nWe noticed your company is hiring...",
-                "from_name": from_name
-            })
+            subject = f"Exciting Opportunity at {contact.client_name}"
+            body_text = f"Dear {contact.first_name},\nWe noticed your company is hiring..."
 
-        if not messages_to_send:
-            logger.info("No messages to send")
-            job_run.status = JobStatus.COMPLETED
-            job_run.ended_at = datetime.utcnow()
-            job_run.counters_json = json.dumps(counters)
-            db.commit()
-            return counters
-
-        # Send emails (or simulate in dry run)
-        for msg in messages_to_send:
-            contact = msg["contact"]
             try:
                 if dry_run:
-                    logger.info("DRY RUN - Would send to", email=msg["to_email"])
-                    status = OutreachStatus.SKIPPED
+                    logger.info("DRY RUN - Would send to", email=contact.email, via=sending_mailbox.email)
+                    send_status = OutreachStatus.SKIPPED
                     skip_reason = "dry_run"
                 else:
-                    result = adapter.send_email(
-                        to_email=msg["to_email"],
-                        subject=msg["subject"],
-                        body_html=msg["body_html"],
-                        body_text=msg["body_text"],
-                        from_name=msg["from_name"]
+                    result = send_outreach_email(
+                        sender_mailbox=sending_mailbox,
+                        to_email=contact.email,
+                        subject=subject,
+                        body_html=body_content,
+                        body_text=body_text
                     )
 
                     if result["success"]:
-                        status = OutreachStatus.SENT
+                        send_status = OutreachStatus.SENT
                         skip_reason = None
                         counters["sent"] += 1
+                        sent_count += 1
+                        # Update mailbox counters
+                        sending_mailbox.emails_sent_today += 1
+                        sending_mailbox.total_emails_sent += 1
+                        sending_mailbox.last_sent_at = datetime.utcnow()
                     else:
-                        status = OutreachStatus.SKIPPED
+                        send_status = OutreachStatus.SKIPPED
                         skip_reason = result.get("error", "Unknown error")
                         counters["errors"] += 1
 
                 # Record event
                 event = OutreachEvent(
                     contact_id=contact.contact_id,
-                    channel=OutreachChannel.SMTP if not dry_run else OutreachChannel.MAILMERGE,
-                    subject=msg["subject"],
-                    status=status,
-                    skip_reason=skip_reason
+                    channel=OutreachChannel.SMTP,
+                    subject=subject,
+                    status=send_status,
+                    skip_reason=skip_reason,
+                    body_html=body_content,
+                    body_text=body_text
                 )
                 db.add(event)
 
-                if status == OutreachStatus.SENT:
+                if send_status == OutreachStatus.SENT:
                     contact.last_outreach_date = datetime.now().isoformat()
 
             except Exception as e:
-                logger.error("Error sending email", error=str(e), email=msg["to_email"])
+                logger.error("Error sending email", error=str(e), email=contact.email)
                 counters["errors"] += 1
 
         db.commit()
@@ -460,8 +478,6 @@ def run_outreach_for_lead(
         if not contacts:
             return {"message": "No contacts found for this lead", **counters}
 
-        adapter = get_email_send_adapter()
-
         for contact in contacts:
             eligible, reason = check_send_eligibility(db, contact)
             if not eligible:
@@ -469,19 +485,22 @@ def run_outreach_for_lead(
                 logger.debug("Contact skipped", email=contact.email, reason=reason)
                 continue
 
-            # Get sending mailbox
+            # Get sending mailbox (Cold Ready or Active, least loaded, with successful connection)
             sending_mailbox = db.query(SenderMailbox).filter(
                 SenderMailbox.is_active == True,
-                SenderMailbox.emails_sent_today < SenderMailbox.daily_send_limit
-            ).first()
+                SenderMailbox.warmup_status.in_([WarmupStatus.COLD_READY, WarmupStatus.ACTIVE]),
+                SenderMailbox.emails_sent_today < SenderMailbox.daily_send_limit,
+                SenderMailbox.connection_status == "successful"
+            ).order_by(SenderMailbox.emails_sent_today.asc()).first()
+
+            if not sending_mailbox:
+                logger.warning("No available sender mailbox with successful connection")
+                counters["skipped"] += 1
+                continue
 
             signature_html = ""
-            from_name = "Exzelon Team"
-            if sending_mailbox:
-                if sending_mailbox.email_signature_json:
-                    signature_html = render_signature_html(sending_mailbox.email_signature_json)
-                if sending_mailbox.display_name:
-                    from_name = sending_mailbox.display_name
+            if sending_mailbox.email_signature_json:
+                signature_html = render_signature_html(sending_mailbox.email_signature_json)
 
             body_content = f"<p>Dear {contact.first_name},</p>"
             body_content += f"<p>We noticed {lead.client_name} is hiring for {lead.job_title} and wanted to reach out about our staffing solutions.</p>"
@@ -493,21 +512,25 @@ def run_outreach_for_lead(
 
             try:
                 if dry_run:
-                    logger.info("DRY RUN - Would send to", email=contact.email)
+                    logger.info("DRY RUN - Would send to", email=contact.email, via=sending_mailbox.email)
                     send_status = OutreachStatus.SKIPPED
                     skip_reason = "dry_run"
                 else:
-                    result = adapter.send_email(
+                    result = send_outreach_email(
+                        sender_mailbox=sending_mailbox,
                         to_email=contact.email,
                         subject=subject,
                         body_html=body_content,
-                        body_text=body_text,
-                        from_name=from_name
+                        body_text=body_text
                     )
                     if result["success"]:
                         send_status = OutreachStatus.SENT
                         skip_reason = None
                         counters["sent"] += 1
+                        # Update mailbox counters
+                        sending_mailbox.emails_sent_today += 1
+                        sending_mailbox.total_emails_sent += 1
+                        sending_mailbox.last_sent_at = datetime.utcnow()
                     else:
                         send_status = OutreachStatus.SKIPPED
                         skip_reason = result.get("error", "Unknown error")
@@ -516,7 +539,7 @@ def run_outreach_for_lead(
                 event = OutreachEvent(
                     contact_id=contact.contact_id,
                     lead_id=lead_id,
-                    channel=OutreachChannel.SMTP if not dry_run else OutreachChannel.MAILMERGE,
+                    channel=OutreachChannel.SMTP,
                     subject=subject,
                     status=send_status,
                     skip_reason=skip_reason,
